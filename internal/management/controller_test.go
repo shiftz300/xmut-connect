@@ -36,14 +36,14 @@ func (s *testSession) Close(_ context.Context, logout bool) error {
 
 type testTunnel struct {
 	fail  chan error
-	probe func(context.Context) error
+	probe func(context.Context) (int, error)
 }
 
-func (t *testTunnel) Probe(ctx context.Context) error {
+func (t *testTunnel) Probe(ctx context.Context) (int, error) {
 	if t.probe != nil {
 		return t.probe(ctx)
 	}
-	return nil
+	return 200, nil
 }
 func (t *testTunnel) Failure() <-chan error { return t.fail }
 func (t *testTunnel) Services() Services    { return Services{Shadowsocks: true} }
@@ -165,11 +165,11 @@ func TestTunnelRecoveryExpiryAndLogout(t *testing.T) {
 func TestHealthDoesNotInferSuccessFromListeners(t *testing.T) {
 	session := newTestSession()
 	var probeCalls atomic.Int32
-	session.tunnel.probe = func(context.Context) error {
+	session.tunnel.probe = func(context.Context) (int, error) {
 		if probeCalls.Add(1) <= 3 {
-			return ErrDNS
+			return 0, ErrDNS
 		}
-		return nil
+		return 200, nil
 	}
 	c := NewController(Options{
 		RetryDelay: time.Millisecond, HealthInterval: 100 * time.Millisecond,
@@ -194,7 +194,7 @@ func TestHealthDoesNotInferSuccessFromListeners(t *testing.T) {
 
 func TestNetworkRecoveryIsBounded(t *testing.T) {
 	session := newTestSession()
-	session.tunnel.probe = func(context.Context) error { return ErrNetwork }
+	session.tunnel.probe = func(context.Context) (int, error) { return 0, ErrNetwork }
 	var authCalls atomic.Int32
 	c := NewController(Options{
 		RetryDelay: time.Millisecond,
@@ -263,7 +263,7 @@ func TestRejectedTunnelDoesNotTriggerRepeatedSMS(t *testing.T) {
 		Authenticate: func(_ context.Context, _ func(context.Context) (string, error), done func()) (Session, error) {
 			authCalls.Add(1)
 			session := newTestSession()
-			session.tunnel.probe = func(context.Context) error { return ErrExpired }
+			session.tunnel.probe = func(context.Context) (int, error) { return 0, ErrExpired }
 			done()
 			return session, nil
 		},
@@ -275,5 +275,37 @@ func TestRejectedTunnelDoesNotTriggerRepeatedSMS(t *testing.T) {
 	waitStatus(t, c, func(s Status) bool { return s.State == Expired && !s.Active })
 	if authCalls.Load() != 2 {
 		t.Fatal("unusable session triggered repeated authentication")
+	}
+}
+
+func TestHealthProbeLogsHTTPStatus(t *testing.T) {
+	session := newTestSession()
+	var probeCalls atomic.Int32
+	session.tunnel.probe = func(context.Context) (int, error) {
+		if probeCalls.Add(1) == 1 {
+			return 403, ErrProbeResponse
+		}
+		return 204, nil
+	}
+	c := NewController(Options{
+		RetryDelay: time.Millisecond,
+		Authenticate: func(_ context.Context, _ func(context.Context) (string, error), done func()) (Session, error) {
+			done()
+			return session, nil
+		},
+	})
+	defer c.Close()
+	if err := c.Login(); err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, c, Connected)
+
+	var failure, success bool
+	for _, event := range c.events.list() {
+		failure = failure || (event.Level == "WARN" && event.Message == "health_check http_status=403")
+		success = success || (event.Level == "INFO" && event.Message == "health_check http_status=204")
+	}
+	if !failure || !success {
+		t.Fatalf("missing health-check logs: %+v", c.events.list())
 	}
 }

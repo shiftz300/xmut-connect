@@ -43,7 +43,7 @@ func (l *eventLog) list() []Event {
 	return result
 }
 
-// Only predefined state names and error codes enter the log and webhook.
+// State transitions use predefined names and error codes in the log and webhook.
 func (c *Controller) transitionLocked(state State, code, notification string) {
 	if c.status.State == state && c.status.Error == code {
 		return

@@ -267,30 +267,30 @@ func (t *managedTunnel) startProxies(ctx context.Context, base *configuredTunnel
 	return nil
 }
 
-func (t *managedTunnel) Probe(ctx context.Context) error {
+func (t *managedTunnel) Probe(ctx context.Context) (int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.resourceURL, nil)
 	if err != nil {
-		return management.ErrProbeTarget
+		return 0, management.ErrProbeTarget
 	}
 	resp, err := t.probe.Do(req)
 	if err != nil {
 		var dns *net.DNSError
 		switch {
 		case errors.Is(err, easyconnect.ErrSangforShutdown), errors.Is(err, easyconnect.ErrSessionExpired):
-			return management.ErrExpired
+			return 0, management.ErrExpired
 		case errors.As(err, &dns):
-			return management.ErrDNS
+			return 0, management.ErrDNS
 		case errors.Is(err, dial.ErrACLDenied):
-			return management.ErrProbeTarget
+			return 0, management.ErrProbeTarget
 		default:
-			return management.ErrNetwork
+			return 0, management.ErrNetwork
 		}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
-		return nil
+		return resp.StatusCode, nil
 	}
-	return management.ErrProbeResponse
+	return resp.StatusCode, management.ErrProbeResponse
 }
 
 func (t *managedTunnel) Failure() <-chan error         { return t.fail }

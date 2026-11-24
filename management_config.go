@@ -54,10 +54,10 @@ func validateManagementConfig(cfg *configs.Config) error {
 	if !validLoopbackBind(cfg.ManagementBind) {
 		return errors.New("management_bind must be a loopback IP address and port")
 	}
-	if n := len(cfg.ManagementToken); n < 32 || n > 256 || strings.IndexFunc(cfg.ManagementToken, func(r rune) bool {
+	if n := len(cfg.ManagementToken); n < 8 || n > 256 || strings.IndexFunc(cfg.ManagementToken, func(r rune) bool {
 		return r < '!' || r > '~' || r == ','
 	}) >= 0 {
-		return errors.New("management_token must contain 32 to 256 printable ASCII characters without spaces or commas")
+		return errors.New("management_token must contain 8 to 256 printable ASCII characters without spaces or commas")
 	}
 	if cfg.ManagementOrigin != "" {
 		origin, ok := parseManagementURL(cfg.ManagementOrigin, true)

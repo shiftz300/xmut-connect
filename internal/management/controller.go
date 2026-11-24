@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -68,7 +69,7 @@ type Status struct {
 }
 
 type Tunnel interface {
-	Probe(context.Context) error
+	Probe(context.Context) (httpStatus int, err error)
 	Failure() <-chan error
 	Services() Services
 	Close()
@@ -453,7 +454,7 @@ func (c *Controller) monitor(a *attempt, session Session, tunnel Tunnel) (bool, 
 		}
 
 		ctx, cancel := context.WithTimeout(a.ctx, 8*time.Second)
-		err := tunnel.Probe(ctx)
+		httpStatus, err := tunnel.Probe(ctx)
 		cancel()
 		if a.ctx.Err() != nil {
 			return healthy, a.ctx.Err()
@@ -465,6 +466,13 @@ func (c *Controller) monitor(a *attempt, session Session, tunnel Tunnel) (bool, 
 		now := time.Now()
 		c.mu.Lock()
 		c.status.Health.LastCheck = &now
+		if httpStatus != 0 {
+			level := "INFO"
+			if err != nil {
+				level = "WARN"
+			}
+			c.recordLocked(level, "health_check http_status="+strconv.Itoa(httpStatus))
+		}
 		if err == nil {
 			failures = 0
 			healthy = true

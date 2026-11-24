@@ -74,3 +74,18 @@ func TestManagementRejectsInsecureSettings(t *testing.T) {
 		})
 	}
 }
+
+func TestManagementTokenLength(t *testing.T) {
+	cfg := configs.Default()
+	cfg.ManagementEnabled = true
+	cfg.Username, cfg.Password = "fixture", "fixture"
+	cfg.HealthCheckURL = "https://campus.example/health"
+
+	for _, size := range []int{7, 8, 64, 256, 257} {
+		cfg.ManagementToken = strings.Repeat("x", size)
+		err := validateManagementConfig(&cfg)
+		if wantError := size < 8 || size > 256; (err != nil) != wantError {
+			t.Errorf("management token length %d returned %v, want error %t", size, err, wantError)
+		}
+	}
+}

@@ -18,7 +18,7 @@ sudo install -m 0600 -o xmut-connect -g xmut-connect /dev/null /etc/xmut-connect
 sudoedit /etc/xmut-connect/config.toml
 ```
 
-新安装时执行创建空配置文件的命令。已有配置时直接编辑。令牌和 Shadowsocks 密码各生成一次独立随机值，例如分别运行 `openssl rand -hex 32`。配置文件使用 TOML，实际凭据只填入 VPS 上权限为 `0600` 的文件。
+新安装时执行创建空配置文件的命令。已有配置时直接编辑。管理令牌可以自选 8–256 个可打印 ASCII 字符，排除空格和逗号。生成 8 位随机令牌可用 `openssl rand -hex 4`，Shadowsocks 密码单独用 `openssl rand -hex 32` 生成。配置文件使用 TOML，实际凭据只填入 VPS 上权限为 `0600` 的文件。
 
 ```toml
 protocol = "easyconnect"
@@ -34,7 +34,7 @@ shadowsocks_url = "ss://chacha20-ietf-poly1305:REPLACE_WITH_INDEPENDENT_RANDOM_P
 
 management_enabled = true
 management_bind = "127.0.0.1:11083"
-management_token = "REPLACE_WITH_RANDOM_64_HEX_CHARACTERS"
+management_token = "REPLACE_WITH_YOUR_MANAGEMENT_TOKEN"
 management_webui = true
 # management_origin = "https://vpn-admin.example.com"
 sms_wait_timeout = 180
@@ -43,7 +43,7 @@ health_check_interval = 60
 # webhook_url = "https://notify.example.com/vpn-events"
 ```
 
-把健康检查地址换成该账号能通过 VPN 访问、无需额外登录并返回 2xx 或 3xx 的校园资源。探针按现有 DNS 配置解析目标，通过资源匹配后强制走 VPN，验证 TLS 证书并禁止跳转。域名解析失败和目标未匹配策略有独立状态。在部署只允许 IP 资源的网关上，可使用获授权且证书匹配目标的地址，或者为该域配置已有的 `custom_dns`。普通网络错误最多尝试三次隧道重建，退避从 2 秒开始。重建复用当前合法会话，服务端明确判定会话失效时才发起一次完整认证。短信认证失败或超时后需要用户再次发起。
+把健康检查地址换成该账号能通过 VPN 访问、无需额外登录并返回 2xx 或 3xx 的校园资源。探针按现有 DNS 配置解析目标，通过资源匹配后强制走 VPN，验证 TLS 证书并禁止跳转。收到 HTTP 响应时，日志会记录状态码，例如 `health_check http_status=403`。域名解析失败和目标未匹配策略有独立状态。在部署只允许 IP 资源的网关上，可使用获授权且证书匹配目标的地址，或者为该域配置已有的 `custom_dns`。普通网络错误最多尝试三次隧道重建，退避从 2 秒开始。重建复用当前合法会话，服务端明确判定会话失效时才发起一次完整认证。短信认证失败或超时后需要用户再次发起。
 
 1. 在 1Panel 打开 **工具箱 → 进程守护**，初始化 Supervisor，选用系统实际的 Supervisor 服务名称和配置路径。系统通常通过软件包提供 Supervisor。
 2. 创建一个名为 `xmut-connect` 的守护进程，使用绝对命令 `/usr/local/bin/xmut-connect -config /etc/xmut-connect/config.toml`，工作目录填 `/etc/xmut-connect`，运行账号为 `xmut-connect`。
@@ -101,7 +101,7 @@ proxies:
 | `management_enabled` | `ZJU_CONNECT_MANAGEMENT_ENABLED` | `false` |
 | `management_bind` | `ZJU_CONNECT_MANAGEMENT_BIND` | `127.0.0.1:11083` |
 | `management_origin` | `ZJU_CONNECT_MANAGEMENT_ORIGIN` | 空，仅接受回环 Host |
-| `management_token` | `ZJU_CONNECT_MANAGEMENT_TOKEN` | 空，启用时必须设置 |
+| `management_token` | `ZJU_CONNECT_MANAGEMENT_TOKEN` | 空，启用时设置 8–256 位 |
 | `management_webui` | `ZJU_CONNECT_MANAGEMENT_WEBUI` | `true` |
 | `sms_wait_timeout` | `ZJU_CONNECT_SMS_WAIT_TIMEOUT` | 180 秒 |
 | `health_check_url` | `ZJU_CONNECT_HEALTH_CHECK_URL` | 空，启用时必须设置 |
