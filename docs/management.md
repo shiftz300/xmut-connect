@@ -9,7 +9,7 @@
 从 [GitHub Releases](https://github.com/shiftz300/xmut-connect/releases) 下载同一版本的 `xmut-connect-linux-amd64` 和 `SHA256SUMS`，然后校验文件。以下以 Debian/Ubuntu 为例，使用专用非 root 账号与高位端口。也可以用系统对应的 `useradd` 命令创建服务账号。
 
 ```sh
-sha256sum --ignore-missing -c SHA256SUMS
+awk '$2 == "xmut-connect-linux-amd64"' SHA256SUMS | sha256sum -c -
 sudo adduser --system --group --no-create-home xmut-connect
 sudo install -m 0755 xmut-connect-linux-amd64 /usr/local/bin/xmut-connect
 sudo install -d -m 0750 -o root -g xmut-connect /etc/xmut-connect
@@ -162,4 +162,4 @@ git tag -a vX.Y.Z -m "Describe the release"
 git push origin refs/tags/vX.Y.Z
 ```
 
-每次发布都检查标签对应的 [Actions 构建](https://github.com/shiftz300/xmut-connect/actions/workflows/build.yml) 和 [GitHub Release](https://github.com/shiftz300/xmut-connect/releases)。测试和平台构建全部通过后，Actions 会发布平台 ZIP、Linux AMD64 裸二进制和 `SHA256SUMS`。运行失败时重试对应的工作流。Android AAR 仍可通过独立工作流构建。
+每次发布都检查标签对应的 [Release 工作流](https://github.com/shiftz300/xmut-connect/actions/workflows/release.yml) 和 [GitHub Release](https://github.com/shiftz300/xmut-connect/releases)。版本标签推送触发独立 Release 工作流。测试和平台构建全部通过后，Actions 会发布平台 ZIP、Linux AMD64 裸二进制和 `SHA256SUMS`。运行失败时重试对应任务。如果 GitHub 未生成运行记录，可在 Release 工作流的 “Run workflow” 中选中同一个标签再运行。Android AAR 仍可通过独立工作流构建。

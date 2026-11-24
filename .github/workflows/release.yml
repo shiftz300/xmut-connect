@@ -1,0 +1,17 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-release:
+    if: github.ref_type == 'tag' && (github.event_name == 'workflow_dispatch' || github.event.created)
+    permissions:
+      contents: write
+    uses: ./.github/workflows/build.yml
