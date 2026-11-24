@@ -1,0 +1,22 @@
+[Unit]
+Description=Xmut Connect VPN Management
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=xmut-connect
+Group=xmut-connect
+WorkingDirectory=/etc/xmut-connect
+ExecStart=/usr/local/bin/xmut-connect -config /etc/xmut-connect/config.toml
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+UMask=0077
+NoNewPrivileges=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

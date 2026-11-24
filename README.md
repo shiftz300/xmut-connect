@@ -82,6 +82,10 @@
 
 [链接](docs/service.md)
 
+#### 通过浏览器管理 EasyConnect
+
+启用管理模式后，程序在前台提供独立的管理 API 和深色 WebUI。可以发起登录、提交短信验证码、查看校园资源连通性、重新连接和注销。适合使用 1Panel 的 Supervisor 在 Linux VPS 上守护。配置、部署和 API 见 [管理模式文档](docs/management.md)，实现说明见 [变更说明](docs/management-changes.md)。
+
 #### Docker 运行
 
 [链接](docs/docker.md)

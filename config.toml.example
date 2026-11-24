@@ -42,6 +42,17 @@ custom_dns = [
 ]
 
 
+# Optional EasyConnect management (keep the working configuration private: chmod 600)
+management_enabled = false
+management_bind = "127.0.0.1:11083"
+management_origin = "" # External HTTPS origin when behind a reverse proxy
+management_token = "" # Generate a random token, for example openssl rand -hex 32
+management_webui = true
+sms_wait_timeout = 180
+health_check_url = "" # Required when enabled; an authorized campus HTTP(S) resource
+health_check_interval = 60
+webhook_url = "" # Optional HTTPS endpoint
+
 # EasyConnect specific settings
 totp_secret = ""
 cert_file = ""

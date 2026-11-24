@@ -4,8 +4,7 @@ package main
 
 import (
 	"context"
-	"crypto"
-	"crypto/tls"
+	"fmt"
 	"net"
 	"os"
 	"os/signal"
@@ -20,19 +19,11 @@ import (
 	"github.com/mythologyli/zju-connect/client/atrust/auth"
 	easyconnectclient "github.com/mythologyli/zju-connect/client/easyconnect"
 	"github.com/mythologyli/zju-connect/configs"
-	"github.com/mythologyli/zju-connect/dial"
 	"github.com/mythologyli/zju-connect/internal/hook_func"
 	"github.com/mythologyli/zju-connect/internal/keylog"
 	"github.com/mythologyli/zju-connect/log"
-	"github.com/mythologyli/zju-connect/resolve"
 	"github.com/mythologyli/zju-connect/service"
-	"github.com/mythologyli/zju-connect/stack"
-	"github.com/mythologyli/zju-connect/stack/gvisor"
-	"github.com/mythologyli/zju-connect/stack/tcptunnel"
-	"github.com/mythologyli/zju-connect/stack/tun"
 	"github.com/mythologyli/zju-connect/underlay"
-	"golang.org/x/crypto/pkcs12"
-	"inet.af/netaddr"
 )
 
 var conf configs.Config
@@ -43,6 +34,14 @@ func main() {
 	}
 
 	log.Init()
+	if conf.ManagementEnabled {
+		log.Suppress()
+		if err := runManagement(conf); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	log.Println("Start ZJU Connect " + zjuConnectVersionString())
 	if conf.DebugDump {
@@ -77,23 +76,9 @@ func main() {
 	var vpnClient client.Client
 	switch conf.Protocol {
 	case "easyconnect":
-		tlsCert := tls.Certificate{}
-		if conf.CertFile != "" {
-			p12Data, err := os.ReadFile(conf.CertFile)
-			if err != nil {
-				log.Fatalf("Read certificate file error: %s", err)
-			}
-
-			key, cert, err := pkcs12.Decode(p12Data, conf.CertPassword)
-			if err != nil {
-				log.Fatalf("Decode certificate file error: %s", err)
-			}
-
-			tlsCert = tls.Certificate{
-				Certificate: [][]byte{cert.Raw},
-				PrivateKey:  key.(crypto.PrivateKey),
-				Leaf:        cert,
-			}
+		tlsCert, err := readEasyConnectCertificate(conf)
+		if err != nil {
+			log.Fatalf("Read EasyConnect certificate: %v", err)
 		}
 
 		vpnClient = easyconnectclient.NewClient(easyconnectclient.Options{
@@ -116,7 +101,7 @@ func main() {
 		})
 
 		log.Printf("VPN protocol: %s", conf.Protocol)
-		err := vpnClient.(*easyconnectclient.Client).Setup()
+		err = vpnClient.(*easyconnectclient.Client).Setup()
 		if err != nil {
 			vpnClient.(*easyconnectclient.Client).Close()
 			_ = underlayDialer.Close()
@@ -223,172 +208,26 @@ func main() {
 		})
 	}
 
-	ipResources, err := vpnClient.IPResources()
-	if err != nil && !conf.DisableServerConfig {
-		log.Println("No IP resources")
+	tunnel, err := configureTunnel(conf, vpnClient)
+	if err != nil {
+		log.Fatal(err)
 	}
-
-	ipSet, err := vpnClient.IPSet()
-	if err != nil && !conf.DisableServerConfig {
-		log.Println("No IP set")
-	}
-
-	domainResources, err := vpnClient.DomainResources()
-	if err != nil && !conf.DisableServerConfig {
-		log.Println("No domain resources")
-	}
-
-	dnsResource, err := vpnClient.DNSResource()
-	if err != nil && !conf.DisableServerConfig {
-		log.Println("No DNS resource")
-	}
-
-	if conf.Protocol == "easyconnect" {
-		if !conf.DisableZJUConfig {
-			if domainResources == nil {
-				domainResources = make(client.DomainResources)
-			}
-
-			domainResources["zju.edu.cn"] = []client.DomainResource{{
-				PortMin:  1,
-				PortMax:  65535,
-				Protocol: "all",
-			}}
-
-			if ipResources == nil {
-				ipResources = []client.IPResource{}
-			}
-
-			ipResources = append([]client.IPResource{{
-				IPMin:    net.ParseIP("10.0.0.0"),
-				IPMax:    net.ParseIP("10.255.255.255"),
-				PortMin:  1,
-				PortMax:  65535,
-				Protocol: "all",
-			}}, ipResources...)
-
-			ipSetBuilder := netaddr.IPSetBuilder{}
-			if ipSet != nil {
-				ipSetBuilder.AddSet(ipSet)
-			}
-			ipSetBuilder.AddPrefix(netaddr.MustParseIPPrefix("10.0.0.0/8"))
-			ipSet, _ = ipSetBuilder.IPSet()
-		}
-
-		for _, customProxyDomain := range conf.CustomProxyDomain {
-			if domainResources != nil {
-				domainResources[customProxyDomain] = append(domainResources[customProxyDomain], client.DomainResource{
-					PortMin:  1,
-					PortMax:  65535,
-					Protocol: "all",
-				})
-			} else {
-				domainResources = client.DomainResources{
-					customProxyDomain: {{
-						PortMin:  1,
-						PortMax:  65535,
-						Protocol: "all",
-					}},
-				}
-			}
-		}
-	}
-
-	var vpnStack stack.Stack
-	if conf.TCPTunnelMode {
-		vpnStack, err = tcptunnel.NewStack(vpnClient)
-		if err != nil {
-			log.Fatalf("TCP Tunnel stack setup error: %s", err)
-		}
-	} else if conf.TUNMode {
-		vpnTUNStack, err := tun.NewStack(vpnClient, conf.DNSHijack, conf.FakeIP, ipResources)
-		if err != nil {
-			log.Fatalf("Tun stack setup error, make sure you are root user : %s", err)
-		}
-
-		if conf.AddRoute && ipSet != nil {
-			for _, prefix := range ipSet.Prefixes() {
-				log.Printf("Add route to %s", prefix.String())
-				_ = vpnTUNStack.AddRoute(prefix.String())
-			}
-		} else if !conf.AddRoute && !conf.DisableZJUConfig && conf.Protocol == "easyconnect" {
-			log.Println("Add route to 10.0.0.0/8")
-			_ = vpnTUNStack.AddRoute("10.0.0.0/8")
-		}
-
-		if conf.FakeIP {
-			_ = vpnTUNStack.AddRoute("198.18.0.0/16")
-		}
-
-		vpnStack = vpnTUNStack
-	} else {
-		vpnStack, err = gvisor.NewStack(vpnClient)
-		if err != nil {
-			log.Fatalf("gVisor stack setup error: %s", err)
-		}
-	}
-
-	useRemoteDNS := !conf.DisableRemoteDNS
-	remoteDNSServer := conf.RemoteDNSServer
-	policyDNSServers, _ := vpnClient.DNSServers()
-	if useRemoteDNS && remoteDNSServer == "auto" {
-		remoteDNSServer, err = vpnClient.DNSServer()
-		if err != nil {
-			useRemoteDNS = false
-			remoteDNSServer = "10.10.0.21"
-			log.Println("No DNS server provided by server. Disable remote DNS")
-		} else {
-			log.Printf("Use DNS server %s provided by server", remoteDNSServer)
-		}
-	}
-	secondaryDNSServer := conf.SecondaryDNSServer
-	if secondaryDNSServer == "auto" {
-		secondaryDNSServer = "114.114.114.114"
-		if len(policyDNSServers) > 1 {
-			secondaryDNSServer = policyDNSServers[1]
-			log.Printf("Use secondary DNS server %s provided by server", secondaryDNSServer)
-		}
-	}
-
-	vpnResolver := resolve.NewResolver(
-		vpnStack,
-		remoteDNSServer,
-		secondaryDNSServer,
-		conf.DNSTTL,
-		domainResources,
-		dnsResource,
-		useRemoteDNS,
-	)
+	vpnStack, vpnResolver, vpnDialer := tunnel.stack, tunnel.resolver, tunnel.dialer
 	hook_func.RegisterTerminalFunc("CloseResolver", func(ctx context.Context) error {
 		vpnResolver.Close()
 		return nil
 	})
-
-	for _, customDns := range conf.CustomDNSList {
-		ipAddr := net.ParseIP(customDns.IP)
-		if ipAddr == nil {
-			log.Printf("Custom DNS for host name %s is invalid, SKIP", customDns.HostName)
-		}
-		vpnResolver.SetPermanentDNS(customDns.HostName, ipAddr)
-		log.Printf("Add custom DNS: %s -> %s\n", customDns.HostName, customDns.IP)
-	}
-	localResolver := service.NewDnsServer(vpnResolver, []string{remoteDNSServer, conf.SecondaryDNSServer})
-	vpnStack.SetupResolve(localResolver)
-	vpnStack.SetupIPPool(vpnResolver.IPPool)
-
 	go vpnStack.Run()
 
-	vpnDialer := dial.NewDialer(vpnStack, vpnResolver, ipResources, conf.ProxyAll, conf.DialDirectProxy)
-
 	if conf.DNSServerBind != "" {
-		go service.ServeDNS(conf.DNSServerBind, localResolver)
+		go service.ServeDNS(conf.DNSServerBind, tunnel.localResolver)
 	}
 	if conf.TUNMode {
 		clientIP, err := vpnClient.IP()
 		if err != nil || clientIP == nil {
 			log.Printf("Client IP unavailable, skip DNS binding: %v", err)
 		} else {
-			go service.ServeDNS(clientIP.String()+":53", localResolver)
+			go service.ServeDNS(clientIP.String()+":53", tunnel.localResolver)
 		}
 	}
 
@@ -416,7 +255,7 @@ func main() {
 	}
 
 	if !conf.DisableKeepAlive {
-		if conf.KeepAliveURL == "" && !useRemoteDNS {
+		if conf.KeepAliveURL == "" && !tunnel.useRemoteDNS {
 			log.Println("Keep alive is disabled because remote DNS is disabled, and no KeepAliveURL is provided")
 		} else {
 			keepAliveCtx, keepAliveCancel := context.WithCancel(context.Background())

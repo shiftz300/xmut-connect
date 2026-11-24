@@ -1,6 +1,7 @@
 package authchallenge
 
 import (
+	"context"
 	"fmt"
 	"strings"
 )
@@ -81,6 +82,18 @@ type Handler interface {
 	HandleTextCaptcha(TextCaptchaChallenge) (TextCaptchaResponse, error)
 	HandleClickCaptcha(ClickCaptchaChallenge) (ClickCaptchaResponse, error)
 	HandleExternalLogin(ExternalLoginChallenge) (ExternalLoginResponse, error)
+}
+
+// ContextCodeHandler is optional so existing challenge handlers keep working.
+type ContextCodeHandler interface {
+	HandleCodeChallengeContext(context.Context, CodeChallenge) (CodeResponse, error)
+}
+
+func RequestCode(ctx context.Context, handler Handler, challenge CodeChallenge) (CodeResponse, error) {
+	if handler, ok := handler.(ContextCodeHandler); ok {
+		return handler.HandleCodeChallengeContext(ctx, challenge)
+	}
+	return handler.HandleCodeChallenge(challenge)
 }
 
 type HandlerFuncs struct {

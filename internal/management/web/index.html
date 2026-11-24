@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>xmut-connect</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>xmut-connect</h1>
+    </header>
+    <form id="access" class="panel">
+      <label for="token">管理令牌</label>
+      <div class="inline-form">
+        <input id="token" type="password" autocomplete="off" required>
+        <button type="submit" class="primary">解锁</button>
+      </div>
+    </form>
+    <p id="notice" role="status" hidden></p>
+    <div id="dashboard" hidden>
+      <section class="panel" aria-labelledby="status-title">
+        <div class="section-title">
+          <h2 id="status-title">连接状态</h2>
+          <span id="state" class="state">读取中</span>
+        </div>
+        <dl>
+          <div><dt>VPN 服务</dt><dd id="server">—</dd></div>
+          <div><dt>虚拟 IP</dt><dd id="ip">—</dd></div>
+          <div><dt>健康检查</dt><dd id="health">—</dd></div>
+          <div><dt>已连接</dt><dd id="duration">—</dd></div>
+          <div><dt>最近认证</dt><dd id="auth-time">—</dd></div>
+          <div><dt>最近健康检查成功</dt><dd id="health-time">—</dd></div>
+          <div><dt>Shadowsocks</dt><dd id="ss">—</dd></div>
+          <div><dt>SOCKS5</dt><dd id="socks">—</dd></div>
+          <div><dt>版本</dt><dd id="version">—</dd></div>
+        </dl>
+      </section>
+      <section class="panel" aria-labelledby="auth-title">
+        <h2 id="auth-title">认证</h2>
+        <form id="sms" hidden>
+          <label for="code">短信验证码 <span id="expires"></span></label>
+          <div class="inline-form">
+            <input id="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{1,12}" maxlength="12" required>
+            <button type="submit" class="primary">提交验证码</button>
+          </div>
+        </form>
+        <p id="auth-error" role="status" hidden></p>
+        <div class="actions">
+          <button type="button" id="login" class="primary">登录</button>
+          <button type="button" id="reconnect">重新连接</button>
+          <button type="button" id="cancel">取消认证</button>
+          <button type="button" id="logout">注销 VPN</button>
+        </div>
+      </section>
+      <section class="panel" aria-labelledby="logs-title">
+        <h2 id="logs-title">运行日志</h2>
+        <ol id="logs" tabindex="0" aria-label="运行日志"></ol>
+        <p id="log-empty">暂无记录</p>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

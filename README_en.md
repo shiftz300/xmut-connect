@@ -77,6 +77,10 @@
 
 [Link](docs/service_en.md)
 
+#### Manage EasyConnect in a browser
+
+Optional management mode serves a Bearer-authenticated API and embedded dark WebUI for SMS login, campus resource health, reconnection, and logout. See the [management and Supervisor deployment guide](docs/management.md).
+
 #### Run in Docker
 
 [Link](docs/docker_en.md)

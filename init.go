@@ -141,6 +141,15 @@ func newFlagSet(defaults configs.Config) *pflag.FlagSet {
 		flags.String(spec.FlagName, "", spec.Help)
 	}
 
+	flags.Bool("management-enabled", defaults.ManagementEnabled, "Enable the EasyConnect management API")
+	flags.String("management-bind", defaults.ManagementBind, "Management loopback address and port")
+	flags.String("management-origin", defaults.ManagementOrigin, "External HTTPS origin of the management reverse proxy")
+	flags.String("management-token", defaults.ManagementToken, "Management Bearer token (prefer a protected config file)")
+	flags.Bool("management-webui", defaults.ManagementWebUI, "Serve the embedded management WebUI")
+	flags.Int("sms-wait-timeout", defaults.SMSWaitTimeout, "SMS input timeout in seconds")
+	flags.String("health-check-url", defaults.HealthCheckURL, "HTTP(S) campus resource for the management health probe")
+	flags.Int("health-check-interval", defaults.HealthInterval, "Management health probe interval in seconds")
+	flags.String("webhook-url", defaults.WebhookURL, "HTTPS endpoint for management event notifications")
 	flags.String("config", "", "Config file (can also be set with ZJU_CONNECT_CONFIG)")
 	flags.Bool("version", false, "Show version")
 	flags.Bool("auth-info", false, "Fetch aTrust authentication information, but do not login")
@@ -248,6 +257,11 @@ func loadStartupOptions(args []string, environ func() []string) (startupOptions,
 		return startupOptions{}, flags, err
 	}
 
+	if cfg.ManagementEnabled && configFile != "" {
+		if err := checkManagementConfigFile(configFile); err != nil {
+			return startupOptions{}, flags, err
+		}
+	}
 	options.Config = cfg
 	return options, flags, nil
 }
@@ -594,6 +608,12 @@ func initialize(args []string) int {
 		return 0
 	}
 
+	if conf.ManagementEnabled {
+		if err := validateManagementConfig(&conf); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+	}
 	if err := validateConnectConfig(conf); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		fmt.Fprintln(os.Stderr, "Please see: https://github.com/mythologyli/zju-connect")

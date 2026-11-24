@@ -26,3 +26,13 @@ func TestParseResourcesPreservesMultipleRulesForDomain(t *testing.T) {
 		}
 	}
 }
+
+func TestParseResourcesHandlesNonResourceGatewayResponse(t *testing.T) {
+	c := &Client{}
+	if err := c.parseResources("<Auth><Message>session expired</Message></Auth>"); err == nil {
+		t.Fatal("expected invalid resource response to return an error")
+	}
+	if err := c.parseResources(`<Resource><Rcs><Rc/><Rc type="1"/></Rcs><Dns data="" dnsserver="192.0.2.53"/></Resource>`); err != nil {
+		t.Fatalf("expected incomplete resource rows to be ignored: %v", err)
+	}
+}

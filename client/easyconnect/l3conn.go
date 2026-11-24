@@ -1,7 +1,9 @@
 package easyconnect
 
 import (
+	"context"
 	"io"
+	"net"
 	"sync"
 
 	"github.com/mythologyli/zju-connect/log"
@@ -9,87 +11,92 @@ import (
 
 type L3Conn struct {
 	easyConnectClient *Client
+	ctx               context.Context
+	cancel            context.CancelFunc
 
-	sendConn     io.WriteCloser
-	sendLock     sync.Mutex
-	sendErrCount int
-
-	recvConn     io.ReadCloser
-	recvLock     sync.Mutex
-	recvErrCount int
+	send l3Stream
+	recv l3Stream
 }
 
-// try best to read, if return err!=nil, please panic
-func (c *L3Conn) Read(p []byte) (n int, err error) {
-	c.recvLock.Lock()
-	defer c.recvLock.Unlock()
-	for n, err = c.recvConn.Read(p); err != nil && c.recvErrCount < 5; {
+type l3Stream struct {
+	mu      sync.Mutex
+	conn    net.Conn
+	unwatch func() bool
+	retries int
+}
 
-		log.Printf("Error occurred while receiving, retrying: %v", err)
+func (s *l3Stream) set(ctx context.Context, conn net.Conn) {
+	s.conn = conn
+	s.unwatch = context.AfterFunc(ctx, func() { _ = conn.Close() })
+}
 
-		// Do handshake again and create a new recvConn
-		_ = c.recvConn.Close()
-		c.recvConn, err = c.easyConnectClient.RecvConn()
+func (s *l3Stream) close() {
+	if s.conn != nil {
+		s.unwatch()
+		_ = s.conn.Close()
+		s.conn = nil
+	}
+}
+
+func (c *L3Conn) run(stream *l3Stream, packet []byte, transfer func(net.Conn, []byte) (int, error), reconnect func() (net.Conn, error)) (int, error) {
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	for {
+		if c.ctx.Err() != nil || stream.conn == nil {
+			return 0, net.ErrClosed
+		}
+		n, err := transfer(stream.conn, packet)
+		if err == nil || n > 0 || stream.retries >= 5 || c.ctx.Err() != nil {
+			return n, err
+		}
+		log.Print("L3 stream interrupted, retrying")
+		stream.close()
+		stream.retries++
+		conn, err := reconnect()
 		if err != nil {
 			return 0, err
 		}
-		c.recvErrCount++
-		if c.recvErrCount >= 5 {
-			return 0, err
-		}
+		stream.set(c.ctx, conn)
 	}
-	return
 }
 
-// try best to write, if return err!=nil, please panic
-func (c *L3Conn) Write(p []byte) (n int, err error) {
-	c.sendLock.Lock()
-	defer c.sendLock.Unlock()
-	for n, err = c.sendConn.Write(p); err != nil && c.sendErrCount < 5; {
-		log.Printf("Error occurred while sending, retrying: %v", err)
+func (c *L3Conn) Read(p []byte) (int, error) {
+	return c.run(&c.recv, p, net.Conn.Read, func() (net.Conn, error) {
+		return c.easyConnectClient.recvConn(c.ctx)
+	})
+}
 
-		// Do handshake again and create a new sendConn
-		_ = c.sendConn.Close()
-		c.sendConn, err = c.easyConnectClient.SendConn()
-		if err != nil {
-			return 0, err
-		}
-		c.sendErrCount++
-		if c.sendErrCount >= 5 {
-			return 0, err
-		}
-	}
-	return
+func (c *L3Conn) Write(p []byte) (int, error) {
+	return c.run(&c.send, p, net.Conn.Write, func() (net.Conn, error) {
+		return c.easyConnectClient.sendConn(c.ctx)
+	})
 }
 
 func (c *L3Conn) Close() error {
-	if c.sendConn != nil {
-		_ = c.sendConn.Close()
-	}
-	if c.recvConn != nil {
-		_ = c.recvConn.Close()
+	c.cancel()
+	for _, stream := range []*l3Stream{&c.send, &c.recv} {
+		stream.mu.Lock()
+		stream.close()
+		stream.mu.Unlock()
 	}
 	return nil
 }
 
 func (c *Client) NewL3Conn() (io.ReadWriteCloser, error) {
-	conn := &L3Conn{
-		easyConnectClient: c,
-		sendErrCount:      0,
-		recvErrCount:      0,
-	}
-
-	var err error
-	conn.sendConn, err = c.SendConn()
+	ctx, cancel := context.WithCancel(c.lifecycleCtx)
+	l3 := &L3Conn{easyConnectClient: c, ctx: ctx, cancel: cancel}
+	send, err := c.sendConn(ctx)
 	if err != nil {
-		log.Printf("Error occurred while creating sendConn: %v", err)
+		cancel()
 		return nil, err
 	}
+	l3.send.set(ctx, send)
 
-	conn.recvConn, err = c.RecvConn()
+	recv, err := c.recvConn(ctx)
 	if err != nil {
-		log.Printf("Error occurred while creating recvConn: %v", err)
+		_ = l3.Close()
 		return nil, err
 	}
-	return conn, nil
+	l3.recv.set(ctx, recv)
+	return l3, nil
 }

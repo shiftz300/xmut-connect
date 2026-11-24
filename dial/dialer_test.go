@@ -2,6 +2,7 @@ package dial
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 
@@ -111,4 +112,22 @@ func (s *capturingStack) DialTCP(ctx context.Context, _ *net.TCPAddr) (net.Conn,
 }
 func (s *capturingStack) DialUDP(context.Context, *net.UDPAddr) (net.Conn, error) {
 	return nil, nil
+}
+
+func TestDialVPNRequiresAuthorizedResourceAndUsesStack(t *testing.T) {
+	resources := []client.IPResource{{
+		IPMin: net.IPv4(192, 0, 2, 7), IPMax: net.IPv4(192, 0, 2, 7),
+		PortMin: 443, PortMax: 443, Protocol: "tcp", AppID: "health",
+	}}
+	stack := &capturingStack{}
+	dialer := NewDialer(stack, nil, resources, false, "")
+	ctx := context.Background()
+	if _, err := dialer.DialVPN(ctx, "tcp", "192.0.2.7:443"); err != nil || stack.ipResource.AppID != "health" {
+		t.Fatalf("authorized target did not use the VPN stack: %v", err)
+	}
+	for _, addr := range []string{"192.0.2.7:80", "192.0.2.8:443", "[::1]:443"} {
+		if _, err := dialer.DialVPN(ctx, "tcp", addr); !errors.Is(err, ErrACLDenied) {
+			t.Errorf("DialVPN(%s) = %v, want ACL denial", addr, err)
+		}
+	}
 }

@@ -4,27 +4,42 @@ on:
   release:
     types: [published]
   push:
+    branches: ["**"]
+    tags: ["v*"]
     paths:
       - "**/*.go"
       - "go.mod"
       - "go.sum"
+      - "internal/management/web/**"
       - ".github/workflows/*.yml"
   pull_request:
-    types:
-      - opened
     paths:
       - "**/*.go"
       - "go.mod"
       - "go.sum"
+      - "internal/management/web/**"
+      - ".github/workflows/build.yml"
   workflow_dispatch:
 
-permissions: write-all
+permissions:
+  contents: read
+
+env:
+  NIGHTLY_BUILD: ${{ github.event_name == 'push' && github.ref_type == 'branch' && contains(vars.NIGHTLY_RELEASE_ENABLED_BRANCHES, github.ref_name) }}
 
 jobs:
   test:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Validate release tag
+        if: github.ref_type == 'tag'
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Expected a version tag such as v1.4.0 or v1.4.0-rc.1"
+            exit 1
+          fi
+
       - name: Checkout codebase
         uses: actions/checkout@v4
 
@@ -86,7 +101,7 @@ jobs:
 
     steps:
       - name: Checkout codebase
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Show workflow information
         id: get_filename
@@ -97,7 +112,7 @@ jobs:
           echo "ASSET_NAME=$_NAME" >> $GITHUB_ENV
 
       - name: Set up Go
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v5
         with:
           go-version: ^1.25
 
@@ -105,20 +120,16 @@ jobs:
         run: go mod download
 
       - name: Build
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           mkdir -p build_assets
-          SHORT_SHA=$(git rev-parse --short HEAD)
           VERSION=dev
-          VERSION_FLAGS="-X main.zjuConnectVersion=${VERSION}"
-          if [ "${{ github.event_name }}" = "release" ]; then
-            VERSION_FLAGS="-X main.zjuConnectVersion=${RELEASE_TAG}"
-          else
-            VERSION_FLAGS="${VERSION_FLAGS} -X main.CommitID=${SHORT_SHA}"
+          COMMIT_ID=$(git rev-parse --short HEAD)
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            VERSION=$GITHUB_REF_NAME
+            COMMIT_ID=
           fi
           go build -v -o build_assets/zju-connect -trimpath \
-            -ldflags "-s -w -buildid= ${VERSION_FLAGS}" .
+            -ldflags "-s -w -buildid= -X main.zjuConnectVersion=$VERSION -X main.CommitID=$COMMIT_ID" .
 
       - name: Rename Windows zju-connect
         if: matrix.goos == 'windows'
@@ -126,30 +137,95 @@ jobs:
           cd ./build_assets || exit 1
           mv zju-connect zju-connect.exe
 
-      - name: Upload artifact
-        if: github.event_name != 'release'
+      - name: Upload build artifact
+        if: github.ref_type != 'tag' && env.NIGHTLY_BUILD != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: zju-connect-${{ steps.get_filename.outputs.ASSET_NAME }}
           path: build_assets/*
+          if-no-files-found: error
 
-      - name: Create ZIP archive
-        if: github.event_name == 'release' || (github.event_name == 'push' && contains(vars.NIGHTLY_RELEASE_ENABLED_BRANCHES, github.ref_name))
+      - name: Prepare release files
+        if: github.ref_type == 'tag' || env.NIGHTLY_BUILD == 'true'
         run: |
-          pushd build_assets || exit 1
-          zip -9vr ../zju-connect-$ASSET_NAME.zip .
-          popd || exit 1
+          mkdir release_assets
+          zip -9 -j "release_assets/zju-connect-$ASSET_NAME.zip" build_assets/*
+          if [[ "$ASSET_NAME" == linux-amd64 ]]; then
+            cp build_assets/zju-connect release_assets/xmut-connect-linux-amd64
+          fi
 
-      - name: Upload release binary
-        if: github.event_name == 'release' || (github.event_name == 'push' && contains(vars.NIGHTLY_RELEASE_ENABLED_BRANCHES, github.ref_name))
+      - name: Upload release artifact
+        if: github.ref_type == 'tag' || env.NIGHTLY_BUILD == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ steps.get_filename.outputs.ASSET_NAME }}
+          path: release_assets/*
+          if-no-files-found: error
+
+  publish-release:
+    if: github.ref_type == 'tag' || (github.event_name == 'push' && github.ref_type == 'branch' && contains(vars.NIGHTLY_RELEASE_ENABLED_BRANCHES, github.ref_name))
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release-${{ github.ref_type == 'tag' && github.ref_name || 'nightly' }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout release history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Collect release files
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release_assets
+          merge-multiple: true
+
+      - name: Publish GitHub Release
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        working-directory: release_assets
         run: |
-          gh release upload --clobber ${{ github.event_name == 'release' && github.event.release.tag_name || 'nightly' }} zju-connect-${{ steps.get_filename.outputs.ASSET_NAME }}.zip
+          sha256sum -- *.zip xmut-connect-linux-amd64 > SHA256SUMS
+          assets=( *.zip xmut-connect-linux-amd64 SHA256SUMS )
+
+          if [[ "$NIGHTLY_BUILD" == true ]]; then
+            gh release upload nightly "${assets[@]}" --clobber
+            exit 0
+          fi
+
+          tag=$GITHUB_REF_NAME
+          if [[ "$GITHUB_EVENT_NAME" == release ]]; then
+            gh release upload "$tag" "${assets[@]}" --clobber
+            exit 0
+          fi
+
+          if draft=$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [[ "$draft" == true ]]; then
+              gh release upload "$tag" "${assets[@]}" --clobber
+              gh release edit "$tag" --draft=false --verify-tag
+            else
+              echo "Release $tag is already published."
+            fi
+          else
+            prerelease=()
+            if [[ "$tag" == *-* ]]; then
+              prerelease+=(--prerelease)
+            fi
+            git for-each-ref --format='%(contents:subject)%0a%0a%(contents:body)' \
+              "refs/tags/$tag" > release-notes.md
+            gh release create "$tag" "${assets[@]}" "${prerelease[@]}" \
+              --verify-tag --title "xmut-connect $tag" --notes-file release-notes.md
+          fi
 
   update-aur:
-    if: github.event_name == 'release'
-    needs: build
+    if: github.event_name == 'release' && github.repository == 'Mythologyli/zju-connect'
+    needs: publish-release
     runs-on: ubuntu-latest
     permissions: {}
     steps:
@@ -212,11 +288,13 @@ jobs:
           git push
 
   nightly:
-    if: github.event_name != 'release' && github.event_name == 'push' && contains(vars.NIGHTLY_RELEASE_ENABLED_BRANCHES, github.ref_name)
+    if: github.event_name == 'push' && github.ref_type == 'branch' && contains(vars.NIGHTLY_RELEASE_ENABLED_BRANCHES, github.ref_name)
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout codebase
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Move nightly tag
         run: |

@@ -38,6 +38,17 @@ type Config struct {
 	BindInterface       string                 `koanf:"bind_interface"`
 	AutoDetectInterface bool                   `koanf:"auto_detect_interface"`
 
+	// Optional management service.
+	ManagementEnabled bool   `koanf:"management_enabled"`
+	ManagementBind    string `koanf:"management_bind"`
+	ManagementOrigin  string `koanf:"management_origin"`
+	ManagementToken   string `koanf:"management_token"`
+	ManagementWebUI   bool   `koanf:"management_webui"`
+	SMSWaitTimeout    int    `koanf:"sms_wait_timeout"`
+	HealthCheckURL    string `koanf:"health_check_url"`
+	HealthInterval    int    `koanf:"health_check_interval"`
+	WebhookURL        string `koanf:"webhook_url"`
+
 	// EasyConnect fields
 	CertFile           string   `koanf:"cert_file"`
 	CertPassword       string   `koanf:"cert_password"`
@@ -76,6 +87,10 @@ type SingleCustomDNS struct {
 
 func Default() Config {
 	return Config{
+		ManagementBind:          "127.0.0.1:11083",
+		ManagementWebUI:         true,
+		SMSWaitTimeout:          180,
+		HealthInterval:          60,
 		Protocol:                "easyconnect",
 		ServerPort:              443,
 		SocksBind:               ":1080",

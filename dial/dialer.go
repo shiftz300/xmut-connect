@@ -69,6 +69,10 @@ func (d *Dialer) dialDirectHost(ctx context.Context, network, hostAddr string) (
 }
 
 func (d *Dialer) DialIPPort(ctx context.Context, network, ipAddr string) (net.Conn, error) {
+	return d.dialIPPort(ctx, network, ipAddr, false)
+}
+
+func (d *Dialer) dialIPPort(ctx context.Context, network, ipAddr string, requireVPN bool) (net.Conn, error) {
 	hostAddr := ""
 	if _, hostAddrOK := ctx.Value(resolve.ContextKeyResolveHost).(string); hostAddrOK {
 		// hostAddr doesn't have port field at now
@@ -82,6 +86,9 @@ func (d *Dialer) DialIPPort(ctx context.Context, network, ipAddr string) (net.Co
 
 	// If addr is IPv6, use direct connection
 	if len(parts) > 2 {
+		if requireVPN {
+			return nil, ErrACLDenied
+		}
 		return d.dialDirectIP(ctx, network, ipAddr, hostAddr)
 	}
 
@@ -101,6 +108,9 @@ func (d *Dialer) DialIPPort(ctx context.Context, network, ipAddr string) (net.Co
 	if pureIp := net.ParseIP(ip); pureIp != nil {
 		target = &net.IPAddr{IP: pureIp}
 	} else {
+		if requireVPN {
+			return nil, ErrACLDenied
+		}
 		log.Printf("Illegal situation, host is not pure IP format: %s", ip)
 		return d.dialDirectIP(ctx, network, ipAddr, hostAddr)
 	}
@@ -146,12 +156,12 @@ func (d *Dialer) DialIPPort(ctx context.Context, network, ipAddr string) (net.Co
 	// Skipped when IPResources are unavailable (parse_resource=false), since
 	// we have no whitelist to enforce. An empty but non-nil slice still means
 	// resources were parsed and no IP destinations are allowed.
-	if useVPN && !matchedResource && d.ipResources != nil {
+	if !matchedResource && (requireVPN || (useVPN && d.ipResources != nil)) {
 		log.Printf("ACL: refusing %s/%s — not in sangfor IPResources whitelist (would trigger tunnel SHUTDOWN)", ipAddr, network)
 		return nil, ErrACLDenied
 	}
 
-	if useVPN {
+	if useVPN || requireVPN {
 		if network == "tcp" {
 			log.Printf("%s -> VPN", ipAddr)
 
@@ -226,6 +236,23 @@ func (d *Dialer) Dial(ctx context.Context, network string, addr string) (net.Con
 	}
 
 	return d.DialIPPort(ctx, network, ip.String()+":"+port)
+}
+
+// DialVPN requires a resource match and never falls back to a direct
+// connection, including when resolution fails or returns an IPv6 address.
+func (d *Dialer) DialVPN(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || network != "tcp" {
+		return nil, ErrACLDenied
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		ctx, ip, err = d.resolver.Resolve(ctx, host)
+		if err != nil {
+			return nil, &net.DNSError{Name: host, Err: err.Error()}
+		}
+	}
+	return d.dialIPPort(ctx, network, net.JoinHostPort(ip.String(), port), true)
 }
 
 func NewDialer(stack stack.Stack, resolver *resolve.Resolver, ipResources []client.IPResource, alwaysUseVPN bool, dialDirectProxy string) *Dialer {

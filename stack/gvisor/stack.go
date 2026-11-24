@@ -40,7 +40,9 @@ const maxInboundPacketSize = 1500
 type Endpoint struct {
 	client clientpkg.Client
 
-	l3Conn io.ReadWriteCloser
+	mu      sync.RWMutex
+	l3Conn  io.ReadWriteCloser
+	onError func(error)
 
 	dispatcher stack.NetworkDispatcher
 }
@@ -72,10 +74,14 @@ func (ep *Endpoint) Capabilities() stack.LinkEndpointCapabilities {
 }
 
 func (ep *Endpoint) Attach(dispatcher stack.NetworkDispatcher) {
+	ep.mu.Lock()
+	defer ep.mu.Unlock()
 	ep.dispatcher = dispatcher
 }
 
 func (ep *Endpoint) IsAttached() bool {
+	ep.mu.RLock()
+	defer ep.mu.RUnlock()
 	return ep.dispatcher != nil
 }
 
@@ -93,15 +99,23 @@ func (ep *Endpoint) SetOnCloseAction(func()) {}
 
 // WritePackets is called when get packets from gVisor stack. Then it sends them to VPN server
 func (ep *Endpoint) WritePackets(list stack.PacketBufferList) (int, tcpip.Error) {
+	ep.mu.RLock()
+	conn, onError := ep.l3Conn, ep.onError
+	ep.mu.RUnlock()
 	for _, packetBuffer := range list.AsSlice() {
 		buf := joinPacketSlices(packetBuffer.AsSlices())
 
-		if ep.l3Conn != nil {
-			n, err := ep.l3Conn.Write(buf)
+		if conn != nil {
+			n, err := conn.Write(buf)
 			if err != nil {
 				if errors.Is(err, clientpkg.ErrResourceNotFound) {
 					log.Printf("%v", err)
 					continue
+				}
+
+				if onError != nil {
+					onError(err)
+					return 0, &tcpip.ErrClosedForSend{}
 				}
 
 				// Server-initiated SHUTDOWN: known terminal state from
@@ -154,6 +168,13 @@ func NewStack(client clientpkg.Client) (*Stack, error) {
 		HandleLocal:        true,
 	})
 
+	success := false
+	defer func() {
+		if !success {
+			s.gvisorStack.Destroy()
+		}
+	}()
+
 	s.endpoint = &Endpoint{
 		client: client,
 	}
@@ -190,6 +211,7 @@ func NewStack(client clientpkg.Client) (*Stack, error) {
 	s.gvisorStack.SetTransportProtocolOption(tcp.ProtocolNumber, &cOpt)
 	s.gvisorStack.AddRoute(tcpip.Route{Destination: header.IPv4EmptySubnet, NIC: NICID})
 
+	success = true
 	return s, nil
 }
 
@@ -228,27 +250,63 @@ func (s *Stack) SetupIPPool(ipPool *ippool.IPPool[[]clientpkg.DomainResource]) {
 }
 
 func (s *Stack) Run() {
-	var connErr error
-	s.endpoint.l3Conn, connErr = s.endpoint.client.NewL3Conn()
-	if connErr != nil {
-		panic(connErr)
+	conn, err := s.open(nil)
+	if err != nil {
+		panic(err)
 	}
-	// Read from VPN server and send to gVisor stack
+	if err := s.read(conn); err != nil && !hook_func.IsTerminal() {
+		panic(err)
+	}
+}
+
+func (s *Stack) open(onError func(error)) (io.ReadWriteCloser, error) {
+	conn, err := s.endpoint.client.NewL3Conn()
+	if err != nil {
+		return nil, err
+	}
+	s.endpoint.mu.Lock()
+	s.endpoint.l3Conn, s.endpoint.onError = conn, onError
+	s.endpoint.mu.Unlock()
+	return conn, nil
+}
+
+// StartManaged opens both streams before making the stack available to
+// listeners. The owner calls the returned closure before rebuilding.
+func (s *Stack) StartManaged(onError func(error)) (func(), error) {
+	conn, err := s.open(onError)
+	if err != nil {
+		s.gvisorStack.Destroy()
+		return nil, err
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		onError(s.read(conn))
+	}()
+	return func() {
+		_ = conn.Close()
+		<-done
+		s.gvisorStack.Destroy()
+	}, nil
+}
+
+func (s *Stack) read(conn io.Reader) error {
 	buf := make([]byte, maxInboundPacketSize)
 	for {
-		n, err := s.endpoint.l3Conn.Read(buf)
+		n, err := conn.Read(buf)
 		if err != nil {
-			if hook_func.IsTerminal() {
-				return
-			} else {
-				panic(err)
-			}
+			return err
 		}
 		log.DebugPrintf("Recv: read %d bytes", n)
 		log.DebugDumpHex(buf[:n])
 
 		packetBuffer := makeInboundPacketBuffer(buf, n)
-		s.endpoint.dispatcher.DeliverNetworkPacket(header.IPv4ProtocolNumber, packetBuffer)
+		s.endpoint.mu.RLock()
+		dispatcher := s.endpoint.dispatcher
+		s.endpoint.mu.RUnlock()
+		if dispatcher != nil {
+			dispatcher.DeliverNetworkPacket(header.IPv4ProtocolNumber, packetBuffer)
+		}
 		packetBuffer.DecRef()
 	}
 }

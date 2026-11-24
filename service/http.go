@@ -245,3 +245,26 @@ func ServeHTTP(bindAddr string, dialer *dial.Dialer) {
 		}
 	}
 }
+
+func StartManagedHTTP(ctx context.Context, bind string, dialer *dial.Dialer) (func(), error) {
+	listener, err := net.Listen("tcp", bind)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	proxy := newHTTPProxy(dialer)
+	server := newHTTPServer(bind, proxy)
+	server.BaseContext = func(net.Listener) context.Context { return ctx }
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = server.Serve(scopedListener{listener, ctx})
+	}()
+	return func() {
+		cancel()
+		_ = listener.Close()
+		_ = server.Close()
+		<-done
+		proxy.close()
+	}, nil
+}

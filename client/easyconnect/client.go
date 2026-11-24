@@ -38,6 +38,10 @@ type ResourceOptions struct {
 }
 
 type Options struct {
+	Context          context.Context // When set, the caller owns client cleanup.
+	OnAuthenticated  func()
+	OnSessionExpired func()
+
 	Server           string
 	Auth             AuthOptions
 	SessionID        string
@@ -79,6 +83,11 @@ type Client struct {
 	ip        net.IP // Client IP
 	ipReverse []byte
 
+	onAuthenticated    func()
+	onSessionExpired   func()
+	callerOwned        bool
+	keepAliveWorkers   sync.WaitGroup
+	keepAliveMu        sync.Mutex
 	lifecycleCtx       context.Context
 	lifecycleCancel    context.CancelFunc
 	requestIPConn      net.Conn
@@ -91,13 +100,20 @@ type Client struct {
 }
 
 func NewClient(options Options) *Client {
-	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
+	parent := options.Context
+	if parent == nil {
+		parent = context.Background()
+	}
+	lifecycleCtx, lifecycleCancel := context.WithCancel(parent)
 	challengeHandler := options.ChallengeHandler
 	if challengeHandler == nil {
 		challengeHandler = authchallenge.NewCLIHandler(authchallenge.CLIOptions{})
 	}
 	c := &Client{
 		server:            options.Server,
+		callerOwned:       options.Context != nil,
+		onAuthenticated:   options.OnAuthenticated,
+		onSessionExpired:  options.OnSessionExpired,
 		username:          options.Auth.Username,
 		password:          options.Auth.Password,
 		totpSecret:        options.Auth.TOTPSecret,
@@ -131,6 +147,9 @@ func (c *Client) Close() {
 			c.requestIPConn = nil
 		}
 		c.requestIPConnMu.Unlock()
+		c.keepAliveMu.Lock()
+		c.keepAliveMu.Unlock()
+		c.keepAliveWorkers.Wait()
 	})
 }
 
@@ -194,6 +213,15 @@ func (c *Client) CanUseTCPTunnel() bool {
 }
 
 func (c *Client) Setup() error {
+	if err := c.Authenticate(); err != nil {
+		return err
+	}
+	return c.PrepareTunnel()
+}
+
+// Authenticate obtains an authorized EasyConnect session using the configured
+// challenge handler. Setup remains the combined entry point for CLI callers.
+func (c *Client) Authenticate() error {
 	if c.underlayDialer == nil {
 		return errors.New("underlay dialer is required")
 	}
@@ -229,6 +257,18 @@ func (c *Client) Setup() error {
 		}
 	}
 
+	if c.onAuthenticated != nil {
+		c.onAuthenticated()
+	}
+	return nil
+}
+
+// PrepareTunnel obtains the token, resources and IP for an authorized
+// session. Transport failures can be retried without issuing a new SMS.
+func (c *Client) PrepareTunnel() error {
+	if c.twfID == "" {
+		return errors.New("EasyConnect tunnel requires an authenticated session")
+	}
 	// Then, use the TwfID to get token
 	err := c.requestToken()
 	if err != nil {
@@ -241,11 +281,18 @@ func (c *Client) Setup() error {
 	if c.parseResource {
 		resources, err := c.requestResources()
 		if err != nil {
+			if c.callerOwned {
+				return err
+			}
 			log.Printf("Error occurred while requesting resources: %v", err)
 		} else {
-			// Parse the resources
-			err = c.parseResources(resources)
-			if err != nil {
+			c.ipResources = nil
+			if err := c.parseResources(resources); err != nil {
+				// Missing DNS metadata is handled by the configured resolver.
+				// The managed tunnel still needs a parsed resource policy.
+				if c.callerOwned && c.ipResources == nil {
+					return err
+				}
 				log.Printf("Error occurred while parsing resources: %v", err)
 			}
 		}
@@ -256,7 +303,13 @@ func (c *Client) Setup() error {
 	} else {
 		// Error may occur if we request too fast
 		if time.Since(startTime) < time.Second {
-			time.Sleep(time.Second - time.Since(startTime))
+			timer := time.NewTimer(time.Second - time.Since(startTime))
+			select {
+			case <-timer.C:
+			case <-c.lifecycleCtx.Done():
+				timer.Stop()
+				return c.lifecycleCtx.Err()
+			}
 		}
 
 		// Finally, use the token to get client IP
@@ -272,14 +325,29 @@ func (c *Client) Setup() error {
 	// /por/update_session.csp; we mirror that. Guarded by sync.Once so the
 	// repeated Setup calls don't double-start it.
 	c.keepAliveStarted.Do(func() {
-		hook_func.RegisterTerminalFunc("CloseSessionKeepAlive", func(ctx context.Context) error {
-			c.Close()
-			return nil
-		})
-		go c.sessionKeepAliveLoop()
+		if !c.callerOwned {
+			hook_func.RegisterTerminalFunc("CloseSessionKeepAlive", func(ctx context.Context) error {
+				c.Close()
+				return nil
+			})
+		}
+		c.startKeepAliveWorker(c.sessionKeepAliveLoop)
 	})
 
 	return nil
+}
+
+func (c *Client) startKeepAliveWorker(run func()) {
+	c.keepAliveMu.Lock()
+	defer c.keepAliveMu.Unlock()
+	if c.lifecycleCtx.Err() != nil {
+		return
+	}
+	c.keepAliveWorkers.Add(1)
+	go func() {
+		defer c.keepAliveWorkers.Done()
+		run()
+	}()
 }
 
 func (c *Client) ensureSession() error {
@@ -295,6 +363,9 @@ func (c *Client) setHTTPTransport(tlsConfig *tls.Config) {
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = c.dialContext
+	if c.callerOwned {
+		transport.Proxy = nil
+	}
 	transport.TLSClientConfig = tlsConfig.Clone()
 	if c.tlsKeyLogWriter != nil {
 		transport.TLSClientConfig.KeyLogWriter = c.tlsKeyLogWriter
@@ -311,11 +382,15 @@ func (c *Client) dialContext(ctx context.Context, network, address string) (net.
 }
 
 func (c *Client) rawRequestContext() (context.Context, context.CancelFunc) {
+	return c.rawRequestContextFrom(c.lifecycleCtx)
+}
+
+func (c *Client) rawRequestContextFrom(parent context.Context) (context.Context, context.CancelFunc) {
 	timeout := c.rawRequestTimeout
 	if timeout <= 0 {
 		timeout = easyConnectRawRequestTimeout
 	}
-	return context.WithTimeout(c.lifecycleCtx, timeout)
+	return context.WithTimeout(parent, timeout)
 }
 
 func armConnectionContext(ctx context.Context, conn net.Conn) (func(), error) {
@@ -353,7 +428,11 @@ func (c *Client) runSessionKeepAlive(ticks <-chan time.Time, requestTimeout time
 					log.Println("server does not support update_session, stopping keepalive")
 					return
 				}
-				log.Printf("update_session keepalive failed: %v", err)
+				if errors.Is(err, ErrSessionExpired) && c.onSessionExpired != nil {
+					c.onSessionExpired()
+					return
+				}
+				log.Print("update_session keepalive failed")
 			}
 		}
 	}

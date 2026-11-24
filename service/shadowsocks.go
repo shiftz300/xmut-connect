@@ -7,7 +7,6 @@ package service
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/url"
@@ -39,44 +38,67 @@ func parseURL(s string) (addr, cipher, password string, err error) {
 	return
 }
 
-func ServeShadowsocks(dialer *dial.Dialer, url string) {
-	addr, cipher, password, err := parseURL(url)
+func ServeShadowsocks(dialer *dial.Dialer, address string) {
+	run, closeListener, err := shadowsocksListener(context.Background(), dialer, address)
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	ciph, err := core.PickCipher(cipher, []byte{}, password)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	log.Printf("Shadowsocks server listening on %s", addr)
-
-	tcpListener, err := net.Listen("tcp", addr)
-	if err != nil {
-		log.Fatal(err)
-	}
-	udpPacketConn, err := net.ListenPacket("udp", addr)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	hook_func.RegisterTerminalFunc("CloseShadowsocksListener", func(ctx context.Context) error {
-		log.Println("Closing Shadowsocks listener...")
-		if err := tcpListener.Close(); err != nil {
-			return fmt.Errorf("close Shadowsocks TCP listener failed: %w", err)
-		}
-		if err := udpPacketConn.Close(); err != nil {
-			return fmt.Errorf("close Shadowsocks UDP listener failed: %w", err)
-		}
+	hook_func.RegisterTerminalFunc("CloseShadowsocksListener", func(context.Context) error {
+		closeListener()
 		return nil
 	})
-
-	go tcpRemote(tcpListener, ciph.StreamConn, dialer)
-	udpRemote(udpPacketConn, ciph.PacketConn, dialer)
+	run()
 }
 
-func tcpRemote(l net.Listener, shadow func(net.Conn) net.Conn, dialer *dial.Dialer) {
+func StartManagedShadowsocks(ctx context.Context, dialer *dial.Dialer, address string) (func(), error) {
+	run, closeListener, err := shadowsocksListener(ctx, dialer, address)
+	if err != nil {
+		return nil, err
+	}
+	go run()
+	return closeListener, nil
+}
+
+func shadowsocksListener(ctx context.Context, dialer *dial.Dialer, address string) (run func(), closeListener func(), err error) {
+	addr, cipher, password, err := parseURL(address)
+	if err != nil {
+		return nil, nil, err
+	}
+	ciph, err := core.PickCipher(cipher, nil, password)
+	if err != nil {
+		return nil, nil, err
+	}
+	tcpListener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Use the actual TCP port when the caller requested an ephemeral port.
+	udpPacketConn, err := net.ListenPacket("udp", tcpListener.Addr().String())
+	if err != nil {
+		_ = tcpListener.Close()
+		return nil, nil, err
+	}
+	log.Printf("Shadowsocks server listening on %s", tcpListener.Addr())
+	ctx, cancel := context.WithCancel(ctx)
+	var loops sync.WaitGroup
+	loops.Add(2)
+	run = func() {
+		go func() {
+			defer loops.Done()
+			tcpRemote(ctx, scopedListener{tcpListener, ctx}, ciph.StreamConn, dialer, &loops)
+		}()
+		defer loops.Done()
+		udpRemote(ctx, udpPacketConn, ciph.PacketConn, dialer, &loops)
+	}
+	return run, func() {
+		cancel()
+		_ = tcpListener.Close()
+		_ = udpPacketConn.Close()
+		loops.Wait()
+	}, nil
+}
+
+func tcpRemote(ctx context.Context, l net.Listener, shadow func(net.Conn) net.Conn, dialer *dial.Dialer, workers *sync.WaitGroup) {
 	for {
 		c, err := l.Accept()
 		if err != nil {
@@ -89,7 +111,7 @@ func tcpRemote(l net.Listener, shadow func(net.Conn) net.Conn, dialer *dial.Dial
 			continue
 		}
 
-		go func() {
+		workers.Go(func() {
 			defer c.Close()
 			sc := shadow(c)
 
@@ -105,18 +127,19 @@ func tcpRemote(l net.Listener, shadow func(net.Conn) net.Conn, dialer *dial.Dial
 				return
 			}
 
-			rc, err := dialer.Dial(context.Background(), "tcp", tgt.String())
+			rc, err := dialer.Dial(ctx, "tcp", tgt.String())
 			if err != nil {
 				log.Printf("failed to connect to target: %v", err)
 				return
 			}
+			rc = scopeConn(ctx, rc)
 			defer rc.Close()
 
 			log.Printf("[SS][TCP] %s <-> %s", c.RemoteAddr(), tgt)
 			if err = relay(sc, rc); err != nil {
 				log.DebugPrintf("SS TCP relay error: %v", err)
 			}
-		}()
+		})
 	}
 }
 
@@ -144,7 +167,7 @@ func relay(left, right net.Conn) error {
 }
 
 // Listen on addr for encrypted packets and basically do UDP NAT.
-func udpRemote(c net.PacketConn, shadow func(net.PacketConn) net.PacketConn, dialer *dial.Dialer) {
+func udpRemote(ctx context.Context, c net.PacketConn, shadow func(net.PacketConn) net.PacketConn, dialer *dial.Dialer, workers *sync.WaitGroup) {
 	defer func(c net.PacketConn) {
 		_ = c.Close()
 	}(c)
@@ -167,7 +190,7 @@ func udpRemote(c net.PacketConn, shadow func(net.PacketConn) net.PacketConn, dia
 
 		targetAddr := socks.SplitAddr(buf[:n])
 		if targetAddr == nil {
-			log.Printf("failed to split target address from packet: %q", buf[:n])
+			log.Print("failed to split Shadowsocks target address")
 			continue
 		}
 
@@ -175,18 +198,19 @@ func udpRemote(c net.PacketConn, shadow func(net.PacketConn) net.PacketConn, dia
 
 		targetConn := nm.Get(raddr.String())
 		if targetConn == nil {
-			targetConn, err = dialer.Dial(context.Background(), "udp", targetAddr.String())
+			targetConn, err = dialer.Dial(ctx, "udp", targetAddr.String())
 			if err != nil {
 				log.Printf("UDP remote listen error: %v", err)
 				continue
 			}
 
+			targetConn = scopeConn(ctx, targetConn)
 			nm.Add(raddr, targetConn)
-			go func() {
+			workers.Go(func() {
 				_ = udpServerToClientCopy(c, raddr, targetConn, nm.timeout)
 				nm.Del(raddr.String())
 				targetConn.Close()
-			}()
+			})
 		}
 
 		log.Printf("[SS][UDP] %s <-> %s", raddr, targetAddr)

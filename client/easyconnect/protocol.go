@@ -93,11 +93,15 @@ func (c *Client) tlsConn(ctx context.Context, tunnelType string) (*tls.UConn, er
 
 // RecvConn create a special TLS connection to receive data from the VPN server
 func (c *Client) RecvConn() (*tls.UConn, error) {
+	return c.recvConn(c.lifecycleCtx)
+}
+
+func (c *Client) recvConn(parent context.Context) (*tls.UConn, error) {
 	if c.token == nil {
 		return nil, errors.New("token is nil")
 	}
 
-	ctx, cancel := c.rawRequestContext()
+	ctx, cancel := c.rawRequestContextFrom(parent)
 	defer cancel()
 	conn, err := c.tlsConn(ctx, "L3IP")
 	if err != nil {
@@ -126,7 +130,6 @@ func (c *Client) RecvConn() (*tls.UConn, error) {
 		return nil, err
 	}
 	log.DebugPrintf("Recv handshake: wrote %d bytes", n)
-	log.DebugDumpHex(message[:n])
 
 	reply := make([]byte, 1500)
 	n, err = conn.Read(reply)
@@ -136,6 +139,9 @@ func (c *Client) RecvConn() (*tls.UConn, error) {
 	log.DebugPrintf("Recv handshake: read %d bytes", n)
 	log.DebugDumpHex(reply[:n])
 
+	if reply[0] == 0x08 {
+		return nil, ErrSangforShutdown
+	}
 	if reply[0] != 0x01 {
 		return nil, errors.New("unexpected recv handshake reply")
 	}
@@ -161,11 +167,15 @@ func (c *Client) RecvConn() (*tls.UConn, error) {
 // Anything other than the legacy 0x02 success marker is converted into a
 // typed error so the caller can decide policy (retry / re-login / exit).
 func (c *Client) SendConn() (*tls.UConn, error) {
+	return c.sendConn(c.lifecycleCtx)
+}
+
+func (c *Client) sendConn(parent context.Context) (*tls.UConn, error) {
 	if c.token == nil {
 		return nil, errors.New("token is nil")
 	}
 
-	ctx, cancel := c.rawRequestContext()
+	ctx, cancel := c.rawRequestContextFrom(parent)
 	defer cancel()
 	conn, err := c.tlsConn(ctx, "L3IP")
 	if err != nil {
@@ -195,7 +205,6 @@ func (c *Client) SendConn() (*tls.UConn, error) {
 		return nil, err
 	}
 	log.DebugPrintf("Send handshake: wrote %d bytes", n)
-	log.DebugDumpHex(message[:n])
 
 	reply := make([]byte, 1500)
 	n, err = conn.Read(reply)

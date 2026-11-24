@@ -69,27 +69,29 @@ func (c *Client) parseResources(resources string) error {
 		return err
 	}
 
+	root := doc.SelectElement("Resource")
+	if root == nil {
+		return errors.New("no Resource element found")
+	}
 	c.tcpTunnelOnly = false
-	if root := doc.SelectElement("Resource"); root != nil {
-		if other := root.SelectElement("Other"); other != nil {
-			c.tcpTunnelOnly = other.SelectAttrValue("allocateVip", "") == "0"
-		}
+	if other := root.SelectElement("Other"); other != nil {
+		c.tcpTunnelOnly = other.SelectAttrValue("allocateVip", "") == "0"
 	}
 
+	element := root.SelectElement("Rcs")
+	if element == nil {
+		return errors.New("no Rcs element found")
+	}
 	ipSetBuilder := netaddr.IPSetBuilder{}
 	c.ipResources = make([]client.IPResource, 0)
 	c.domainResources = make(client.DomainResources)
 	c.dnsResource = make(map[string][]net.IP)
 
-	element := doc.SelectElement("Resource").SelectElement("Rcs")
-	if element == nil {
-		return errors.New("no Rcs element found")
-	}
-
 	for _, rc := range element.SelectElements("Rc") {
-		if rc.SelectAttr("type").Value == "1" || rc.SelectAttr("type").Value == "2" {
+		resourceType := rc.SelectAttrValue("type", "")
+		if resourceType == "1" || resourceType == "2" {
 			var protocol string
-			protoStr := rc.SelectAttr("proto").Value
+			protoStr := rc.SelectAttrValue("proto", "")
 			if protoStr == "-1" {
 				protocol = "all"
 			} else if protoStr == "0" {
@@ -210,7 +212,7 @@ func (c *Client) parseResources(resources string) error {
 		}
 	}
 
-	element = doc.SelectElement("Resource").SelectElement("Dns")
+	element = root.SelectElement("Dns")
 	if element == nil {
 		return errors.New("no Rcs element found")
 	}
