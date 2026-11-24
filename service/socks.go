@@ -68,6 +68,7 @@ func StartManagedSOCKS5(ctx context.Context, bind string, dialer *dial.Dialer, r
 	if err != nil {
 		return nil, err
 	}
+	log.Printf("SOCKS5 server listening on %s", listener.Addr())
 	ctx, cancel := context.WithCancel(ctx)
 	workers := &socksWorkers{}
 	scopedDial := func(requestCtx context.Context, network, address string) (net.Conn, error) {

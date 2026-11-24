@@ -65,8 +65,10 @@ func validateManagementConfig(cfg *configs.Config) error {
 			return errors.New("management_origin must be an HTTPS origin without a path")
 		}
 	}
-	if _, ok := parseManagementURL(cfg.HealthCheckURL, false); !ok {
-		return errors.New("health_check_url must point to an HTTP(S) campus resource")
+	if cfg.HealthCheckURL != "" {
+		if _, ok := parseManagementURL(cfg.HealthCheckURL, false); !ok {
+			return errors.New("health_check_url must be empty or point to an HTTP(S) campus resource")
+		}
 	}
 	if cfg.HealthInterval < 5 || cfg.HealthInterval > 3600 || cfg.SMSWaitTimeout < 10 || cfg.SMSWaitTimeout > 600 {
 		return errors.New("health_check_interval must be 5–3600 seconds and sms_wait_timeout 10–600 seconds")

@@ -14,12 +14,6 @@ func Init() {
 	log.SetOutput(os.Stdout)
 }
 
-// Suppress disables upstream diagnostics when only predefined events are safe to log.
-func Suppress() {
-	DisableDebug()
-	log.SetOutput(io.Discard)
-}
-
 func EnableDebug() {
 	debug.Store(true)
 }

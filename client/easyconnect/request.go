@@ -97,7 +97,7 @@ func (c *Client) loginAuthAndPsw(graphCodeFile string) error {
 	}
 	c.twfID = string(twfID[1])
 	rsaKey := string(rsaKeyMatch[1])
-	log.Printf("RSA key: %s", rsaKey)
+	log.DebugPrintf("RSA key: %s", rsaKey)
 
 	rsaExpMatch := regexp.MustCompile(`<RSA_ENCRYPT_EXP>(.*)</RSA_ENCRYPT_EXP>`).FindSubmatch(buf.Bytes())
 	rsaExp := ""
@@ -107,7 +107,7 @@ func (c *Client) loginAuthAndPsw(graphCodeFile string) error {
 		log.Printf("Warning: No RSA_ENCRYPT_EXP, using default")
 		rsaExp = "65537"
 	}
-	log.Printf("RSA exp: %s", rsaExp)
+	log.DebugPrintf("RSA exp: %s", rsaExp)
 
 	csrfMatch := regexp.MustCompile(`<CSRF_RAND_CODE>(.*)</CSRF_RAND_CODE>`).FindSubmatch(buf.Bytes())
 	csrfCode := ""

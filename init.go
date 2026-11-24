@@ -147,7 +147,7 @@ func newFlagSet(defaults configs.Config) *pflag.FlagSet {
 	flags.String("management-token", defaults.ManagementToken, "Management Bearer token (prefer a protected config file)")
 	flags.Bool("management-webui", defaults.ManagementWebUI, "Serve the embedded management WebUI")
 	flags.Int("sms-wait-timeout", defaults.SMSWaitTimeout, "SMS input timeout in seconds")
-	flags.String("health-check-url", defaults.HealthCheckURL, "HTTP(S) campus resource for the management health probe")
+	flags.String("health-check-url", defaults.HealthCheckURL, "HTTP(S) campus resource for the management health probe (empty disables)")
 	flags.Int("health-check-interval", defaults.HealthInterval, "Management health probe interval in seconds")
 	flags.String("webhook-url", defaults.WebhookURL, "HTTPS endpoint for management event notifications")
 	flags.String("config", "", "Config file (can also be set with ZJU_CONNECT_CONFIG)")

@@ -309,3 +309,39 @@ func TestHealthProbeLogsHTTPStatus(t *testing.T) {
 		t.Fatalf("missing health-check logs: %+v", c.events.list())
 	}
 }
+
+func TestHealthDisabledSkipsProbesAndBoundsTunnelRecovery(t *testing.T) {
+	session := newTestSession()
+	var probes atomic.Int32
+	session.tunnel.probe = func(context.Context) (int, error) {
+		probes.Add(1)
+		return 403, ErrProbeResponse
+	}
+	c := NewController(Options{
+		DisableHealthCheck: true,
+		HealthInterval:     time.Hour,
+		RetryDelay:         time.Millisecond,
+		Authenticate: func(_ context.Context, _ func(context.Context) (string, error), done func()) (Session, error) {
+			done()
+			return session, nil
+		},
+	})
+	defer c.Close()
+	if err := c.Login(); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := int32(1); attempt <= 4; attempt++ {
+		status := waitStatus(t, c, func(s Status) bool {
+			return s.State == Connected && session.opens.Load() == attempt
+		})
+		if status.Health.Status != "disabled" || status.Health.LastCheck != nil ||
+			status.Health.LastSuccess != nil || status.ConnectedSince == nil {
+			t.Fatalf("unexpected health status: %+v", status)
+		}
+		session.tunnel.fail <- ErrNetwork
+	}
+	status := waitState(t, c, Failed)
+	if status.Error != "network_failure" || status.Health.Status != "disabled" || probes.Load() != 0 {
+		t.Fatalf("unexpected recovery result: %+v, probes=%d", status, probes.Load())
+	}
+}

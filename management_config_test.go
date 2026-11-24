@@ -58,6 +58,7 @@ func TestManagementRejectsInsecureSettings(t *testing.T) {
 		"wildcard management": func(cfg *configs.Config) { cfg.ManagementBind = "0.0.0.0:11083" },
 		"cleartext webhook":   func(cfg *configs.Config) { cfg.WebhookURL = "http://localhost/a" },
 		"invalid origin":      func(cfg *configs.Config) { cfg.ManagementOrigin = "https://example.com/" },
+		"invalid health URL":  func(cfg *configs.Config) { cfg.HealthCheckURL = "ftp://example.com/" },
 		"unauthenticated SS":  func(cfg *configs.Config) { cfg.ShadowsocksURL = "ss://DUMMY@:1082" },
 		"wildcard SOCKS":      func(cfg *configs.Config) { cfg.SocksBind = "0.0.0.0:1080" },
 	} {
@@ -79,8 +80,7 @@ func TestManagementTokenLength(t *testing.T) {
 	cfg := configs.Default()
 	cfg.ManagementEnabled = true
 	cfg.Username, cfg.Password = "fixture", "fixture"
-	cfg.HealthCheckURL = "https://campus.example/health"
-
+	// Management can start with the default empty health check URL.
 	for _, size := range []int{7, 8, 64, 256, 257} {
 		cfg.ManagementToken = strings.Repeat("x", size)
 		err := validateManagementConfig(&cfg)

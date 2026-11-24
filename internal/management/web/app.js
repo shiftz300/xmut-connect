@@ -92,7 +92,7 @@ function render(status) {
   set("ip", status.virtual_ip || "—");
   set("auth-time", date(status.last_auth));
   set("health-time", date(status.health.last_success));
-  const health = {healthy: "可达", pending: "检查中", idle: "待连接"};
+  const health = {healthy: "可达", pending: "检查中", idle: "待连接", disabled: "已关闭"};
   set("health", health[status.health.status] || "不可达");
   set("duration", status.connected_since ?
     `${Math.floor(status.connected_seconds / 3600)} 小时 ${Math.floor(status.connected_seconds / 60) % 60} 分 ${status.connected_seconds % 60} 秒` : "—");

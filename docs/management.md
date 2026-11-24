@@ -1,6 +1,6 @@
 # EasyConnect 管理 API 与 WebUI
 
-管理模式在前台运行。进程启动后立即提供 HTTP API 和深色 WebUI，初始状态为 `disconnected`。登录由操作员发起。Supervisor 的 RUNNING 表示管理进程存活，VPN 资源可达性由 `GET /api/health` 判断。
+管理模式在前台运行。进程启动后立即提供 HTTP API 和深色 WebUI，初始状态为 `disconnected`。登录由操作员发起。Supervisor 的 RUNNING 表示管理进程存活。配置了健康检查时，可用 `GET /api/health` 查询校园资源可达性。
 
 管理模式支持 EasyConnect 的用户态代理，包括原生 Shadowsocks、SOCKS5 和 HTTP，以及网关已支持的用户态 TCP-only 模式。它固定使用配置指定的网关，每次完整登录使用账号密码和服务端要求的验证码。浏览器处理短信挑战。配置了原生 `totp_secret` 的网关仍可通过已有 TOTP 路径认证。需要图形验证码或未配置 TOTP 密钥的挑战会返回 `unsupported_challenge`。TUN、独立 DNS 监听器和端口转发仍可在原有 CLI 模式使用。
 
@@ -44,6 +44,8 @@ health_check_interval = 60
 ```
 
 把健康检查地址换成该账号能通过 VPN 访问、无需额外登录并返回 2xx 或 3xx 的校园资源。探针按现有 DNS 配置解析目标，通过资源匹配后强制走 VPN，验证 TLS 证书并禁止跳转。收到 HTTP 响应时，日志会记录状态码，例如 `health_check http_status=403`。域名解析失败和目标未匹配策略有独立状态。在部署只允许 IP 资源的网关上，可使用获授权且证书匹配目标的地址，或者为该域配置已有的 `custom_dns`。普通网络错误最多尝试三次隧道重建，退避从 2 秒开始。重建复用当前合法会话，服务端明确判定会话失效时才发起一次完整认证。短信认证失败或超时后需要用户再次发起。
+
+将 `health_check_url` 设为空并重启进程可关闭 HTTP 探针。如果使用了 `ZJU_CONNECT_HEALTH_CHECK_URL`，同步清空或移除该环境变量。关闭后，隧道和代理启动完成即可显示为「已连接」，健康检查显示「已关闭」。VPN 会话保活、过期检测和隧道故障恢复继续运行。
 
 1. 在 1Panel 打开 **工具箱 → 进程守护**，初始化 Supervisor，选用系统实际的 Supervisor 服务名称和配置路径。系统通常通过软件包提供 Supervisor。
 2. 创建一个名为 `xmut-connect` 的守护进程，使用绝对命令 `/usr/local/bin/xmut-connect -config /etc/xmut-connect/config.toml`，工作目录填 `/etc/xmut-connect`，运行账号为 `xmut-connect`。
@@ -104,11 +106,11 @@ proxies:
 | `management_token` | `ZJU_CONNECT_MANAGEMENT_TOKEN` | 空，启用时设置 8–256 位 |
 | `management_webui` | `ZJU_CONNECT_MANAGEMENT_WEBUI` | `true` |
 | `sms_wait_timeout` | `ZJU_CONNECT_SMS_WAIT_TIMEOUT` | 180 秒 |
-| `health_check_url` | `ZJU_CONNECT_HEALTH_CHECK_URL` | 空，启用时必须设置 |
+| `health_check_url` | `ZJU_CONNECT_HEALTH_CHECK_URL` | 空，关闭 HTTP 探针 |
 | `health_check_interval` | `ZJU_CONNECT_HEALTH_CHECK_INTERVAL` | 60 秒 |
 | `webhook_url` | `ZJU_CONNECT_WEBHOOK_URL` | 空，禁用 |
 
-原有 `ZJU_CONNECT_USERNAME`、`ZJU_CONNECT_PASSWORD`、`ZJU_CONNECT_SERVER_ADDRESS`、`ZJU_CONNECT_SHADOWSOCKS_URL` 等变量同样可用。管理模式只输出预定义事件到 stdout/stderr。Webhook 向配置的 HTTPS 地址 POST JSON，字段为 `time`、`level` 和 `message`。可能的事件有 `connected`、`session_expired`、`sms_required`、`tunnel_unavailable`、`severe_error`。投递有超时和有界队列，失败时不会阻塞 VPN。
+原有 `ZJU_CONNECT_USERNAME`、`ZJU_CONNECT_PASSWORD`、`ZJU_CONNECT_SERVER_ADDRESS`、`ZJU_CONNECT_SHADOWSOCKS_URL` 等变量同样可用。终端和 Supervisor 日志包含原生的认证进度、资源解析、虚拟 IP、DNS、保活和代理日志。WebUI 的日志面板和 `/api/logs` 显示管理事件。管理模式禁用协议调试转储。Webhook 向配置的 HTTPS 地址 POST JSON，字段为 `time`、`level` 和 `message`。可能的事件有 `connected`、`session_expired`、`sms_required`、`tunnel_unavailable`、`severe_error`。投递有超时和有界队列，失败时不会阻塞 VPN。
 
 ## REST API
 
@@ -122,7 +124,7 @@ proxies:
 | `POST /api/cancel` | 提交 `{"attempt_id":"…"}`，取消对应认证 |
 | `POST /api/reconnect` | 结束现有会话后发起新登录，必要时等待短信 |
 | `POST /api/logout` | 关闭当前会话或取消正在进行的登录 |
-| `GET /api/health` | 实际校园资源探针结果。健康时返回 `200`，其他状态返回 `503` |
+| `GET /api/health` | 实际校园资源探针结果。健康时返回 `200`，已关闭时返回 `503` 和 `status: disabled`，其他状态返回 `503` |
 | `GET /api/logs` | 最近 128 条脱敏事件，按时间从旧到新 |
 | `GET /api/info` | 版本、启动时间、协议和运行平台 |
 

@@ -251,6 +251,7 @@ func StartManagedHTTP(ctx context.Context, bind string, dialer *dial.Dialer) (fu
 	if err != nil {
 		return nil, err
 	}
+	log.Printf("HTTP server listening on %s", listener.Addr())
 	ctx, cancel := context.WithCancel(ctx)
 	proxy := newHTTPProxy(dialer)
 	server := newHTTPServer(bind, proxy)

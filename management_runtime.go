@@ -20,6 +20,7 @@ import (
 	"github.com/mythologyli/zju-connect/configs"
 	"github.com/mythologyli/zju-connect/dial"
 	"github.com/mythologyli/zju-connect/internal/management"
+	"github.com/mythologyli/zju-connect/log"
 	"github.com/mythologyli/zju-connect/service"
 	"github.com/mythologyli/zju-connect/stack/gvisor"
 	"github.com/mythologyli/zju-connect/underlay"
@@ -40,10 +41,11 @@ func runManagement(cfg configs.Config) error {
 	defer stop()
 	controller := management.NewController(management.Options{
 		Server: address, Version: zjuConnectVersionString(),
-		SMSWait:        time.Duration(cfg.SMSWaitTimeout) * time.Second,
-		HealthInterval: time.Duration(cfg.HealthInterval) * time.Second,
-		LoginCooldown:  15 * time.Second,
-		Notify:         management.Webhook(ctx, cfg.WebhookURL),
+		SMSWait:            time.Duration(cfg.SMSWaitTimeout) * time.Second,
+		HealthInterval:     time.Duration(cfg.HealthInterval) * time.Second,
+		DisableHealthCheck: cfg.HealthCheckURL == "",
+		LoginCooldown:      15 * time.Second,
+		Notify:             management.Webhook(ctx, cfg.WebhookURL),
 		Authenticate: func(ctx context.Context, sms func(context.Context) (string, error), authenticated func()) (management.Session, error) {
 			base, err := underlay.New(underlay.Options{
 				InterfaceName: cfg.BindInterface, AutoDetect: cfg.AutoDetectInterface, LocalDNSServer: cfg.LocalDNSServer,
@@ -94,7 +96,11 @@ func runManagement(cfg configs.Config) error {
 	}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.Serve(listener) }()
+	log.Printf("VPN protocol: %s", cfg.Protocol)
 	fmt.Fprintln(os.Stdout, "management INFO listening on", listener.Addr())
+	if cfg.HealthCheckURL == "" {
+		log.Println("Campus HTTP health check disabled")
+	}
 
 	var result error
 	select {
@@ -185,12 +191,14 @@ func (s *managedSession) Open(parent context.Context) (management.Tunnel, error)
 	ctx, cancel := context.WithCancel(parent)
 	tunnel := &managedTunnel{
 		cancel: cancel, fail: make(chan error, 1), resourceURL: cfg.HealthCheckURL,
-		probe: &http.Client{
+	}
+	if cfg.HealthCheckURL != "" {
+		tunnel.probe = &http.Client{
 			Transport: &http.Transport{
 				DialContext: base.dialer.DialVPN, DisableKeepAlives: true, TLSHandshakeTimeout: 5 * time.Second,
 			},
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		},
+		}
 	}
 	tunnel.closers = append(tunnel.closers, base.resolver.Close)
 	if l3, ok := base.stack.(*gvisor.Stack); ok {
@@ -219,6 +227,7 @@ func (s *managedSession) Open(parent context.Context) (management.Tunnel, error)
 		tunnel.Close()
 		return nil, err
 	}
+	log.Println("VPN tunnel started")
 	if !cfg.DisableKeepAlive && (cfg.KeepAliveURL != "" || base.useRemoteDNS) {
 		done := make(chan struct{})
 		go func() {
@@ -298,7 +307,9 @@ func (t *managedTunnel) Services() management.Services { return t.services }
 
 func (t *managedTunnel) Close() {
 	t.cancel()
-	t.probe.CloseIdleConnections()
+	if t.probe != nil {
+		t.probe.CloseIdleConnections()
+	}
 	for i := len(t.closers) - 1; i >= 0; i-- {
 		t.closers[i]()
 	}

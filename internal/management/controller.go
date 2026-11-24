@@ -85,13 +85,14 @@ type Session interface {
 type Authenticate func(ctx context.Context, sms func(context.Context) (string, error), authenticated func()) (Session, error)
 
 type Options struct {
-	Server, Version string
-	SMSWait         time.Duration
-	HealthInterval  time.Duration
-	LoginCooldown   time.Duration
-	RetryDelay      time.Duration
-	Authenticate    Authenticate
-	Notify          func(Event)
+	Server, Version    string
+	SMSWait            time.Duration
+	HealthInterval     time.Duration
+	DisableHealthCheck bool
+	LoginCooldown      time.Duration
+	RetryDelay         time.Duration
+	Authenticate       Authenticate
+	Notify             func(Event)
 }
 
 type startReason uint8
@@ -133,9 +134,11 @@ func NewController(options Options) *Controller {
 	if options.RetryDelay <= 0 {
 		options.RetryDelay = 2 * time.Second
 	}
-	return &Controller{options: options, status: Status{
-		State: Disconnected, Server: options.Server, Version: options.Version, Health: Health{Status: "idle"},
+	c := &Controller{options: options, status: Status{
+		State: Disconnected, Server: options.Server, Version: options.Version,
 	}}
+	c.setHealthStatusLocked("idle")
+	return c
 }
 
 func (c *Controller) Status() Status {
@@ -252,7 +255,7 @@ func (c *Controller) startLocked(reason startReason) {
 	c.active = a
 	c.nextLogin = time.Now().Add(c.options.LoginCooldown)
 	c.status.AttemptID = a.id
-	c.status.Health.Status = "idle"
+	c.setHealthStatusLocked("idle")
 	if reason != operatorLogin {
 		c.transitionLocked(Reconnecting, "", "")
 	} else {
@@ -344,7 +347,7 @@ func (c *Controller) run(a *attempt) {
 	c.status.ConnectedSince = nil
 	c.status.VirtualIP = ""
 	c.status.Services = Services{}
-	c.status.Health.Status = "idle"
+	c.setHealthStatusLocked("idle")
 	switch {
 	case a.stop == "reconnect" && !c.closed:
 		if closeErr != nil {
@@ -370,7 +373,7 @@ func (c *Controller) run(a *attempt) {
 		if code == "sms_timeout" || code == "sms_rejected" || code == "unsupported_challenge" {
 			event = ""
 		}
-		c.status.Health.Status = errorCode(err, "unavailable")
+		c.setHealthStatusLocked(errorCode(err, "unavailable"))
 		c.transitionLocked(Failed, code, event)
 	}
 }
@@ -387,15 +390,17 @@ func (c *Controller) runSession(a *attempt, session Session) error {
 		}
 		tunnel, err := session.Open(a.ctx)
 		if err == nil {
+			openedAt := time.Now()
 			c.mu.Lock()
-			c.status.Health.Status = "pending"
+			c.setHealthStatusLocked("pending")
 			c.status.VirtualIP = session.IP()
 			c.status.Services = tunnel.Services()
 			c.mu.Unlock()
 			var healthy bool
 			healthy, err = c.monitor(a, session, tunnel)
 			tunnel.Close()
-			if healthy {
+			// Without a probe, a just-opened tunnel has not proven stable.
+			if healthy && (!c.options.DisableHealthCheck || time.Since(openedAt) >= c.options.HealthInterval) {
 				tries = 0
 			}
 		}
@@ -420,8 +425,9 @@ func (c *Controller) runSession(a *attempt, session Session) error {
 			return err
 		}
 		c.mu.Lock()
-		c.status.Health.Status = errorCode(err, "tunnel_interrupted")
-		c.transitionLocked(Reconnecting, c.status.Health.Status, "")
+		code := errorCode(err, "tunnel_interrupted")
+		c.setHealthStatusLocked(code)
+		c.transitionLocked(Reconnecting, code, "")
 		c.mu.Unlock()
 		timer := time.NewTimer(c.options.RetryDelay << tries)
 		select {
@@ -440,8 +446,20 @@ func (c *Controller) runSession(a *attempt, session Session) error {
 func (c *Controller) monitor(a *attempt, session Session, tunnel Tunnel) (bool, error) {
 	var healthy bool
 	var failures int
-	timer := time.NewTimer(0)
-	defer timer.Stop()
+	var timer *time.Timer
+	var nextProbe <-chan time.Time
+	if c.options.DisableHealthCheck {
+		c.mu.Lock()
+		if a.ctx.Err() == nil {
+			c.markConnectedLocked(a, time.Now())
+			healthy = true
+		}
+		c.mu.Unlock()
+	} else {
+		timer = time.NewTimer(0)
+		defer timer.Stop()
+		nextProbe = timer.C
+	}
 	for {
 		select {
 		case <-a.ctx.Done():
@@ -450,7 +468,7 @@ func (c *Controller) monitor(a *attempt, session Session, tunnel Tunnel) (bool, 
 			return healthy, ErrExpired
 		case err := <-tunnel.Failure():
 			return healthy, err
-		case <-timer.C:
+		case <-nextProbe:
 		}
 
 		ctx, cancel := context.WithTimeout(a.ctx, 8*time.Second)
@@ -476,31 +494,25 @@ func (c *Controller) monitor(a *attempt, session Session, tunnel Tunnel) (bool, 
 		if err == nil {
 			failures = 0
 			healthy = true
-			a.wasConnected = true
-			c.status.Health.Status = "healthy"
+			c.setHealthStatusLocked("healthy")
 			c.status.Health.LastSuccess = &now
-			first := c.status.ConnectedSince == nil
-			if first {
-				c.status.ConnectedSince = &now
-				c.status.AttemptID = ""
-				c.transitionLocked(Connected, "", "connected")
-			} else {
-				c.transitionLocked(Connected, "", "")
-			}
+			c.markConnectedLocked(a, now)
 			c.mu.Unlock()
 			timer.Reset(c.options.HealthInterval)
 			continue
 		}
 		failures++
-		c.status.Health.Status = errorCode(err, "network_failure")
-		c.transitionLocked(Reconnecting, c.status.Health.Status, "")
-		if failures == 3 && (errors.Is(err, ErrDNS) || errors.Is(err, ErrProbeResponse) || errors.Is(err, ErrProbeTarget)) {
-			c.recordLocked("WARN", "tunnel_unavailable")
+		code := errorCode(err, "network_failure")
+		c.setHealthStatusLocked(code)
+		c.transitionLocked(Reconnecting, code, "")
+		keepTunnel := errors.Is(err, ErrDNS) || errors.Is(err, ErrProbeResponse) || errors.Is(err, ErrProbeTarget)
+		if failures == 3 && keepTunnel {
+			c.recordLocked("WARN", "health_check_failed")
 			c.notifyLocked("tunnel_unavailable")
 		}
 		c.mu.Unlock()
 		if failures >= 3 {
-			if errors.Is(err, ErrDNS) || errors.Is(err, ErrProbeResponse) || errors.Is(err, ErrProbeTarget) {
+			if keepTunnel {
 				timer.Reset(c.options.HealthInterval)
 				continue
 			}
@@ -508,6 +520,24 @@ func (c *Controller) monitor(a *attempt, session Session, tunnel Tunnel) (bool, 
 		}
 		timer.Reset(c.options.RetryDelay << (failures - 1))
 	}
+}
+
+func (c *Controller) setHealthStatusLocked(status string) {
+	if c.options.DisableHealthCheck {
+		status = "disabled"
+	}
+	c.status.Health.Status = status
+}
+
+func (c *Controller) markConnectedLocked(a *attempt, now time.Time) {
+	a.wasConnected = true
+	if c.status.ConnectedSince == nil {
+		c.status.ConnectedSince = &now
+		c.status.AttemptID = ""
+		c.transitionLocked(Connected, "", "connected")
+		return
+	}
+	c.transitionLocked(Connected, "", "")
 }
 
 func errorCode(err error, fallback string) string {

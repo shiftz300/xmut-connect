@@ -92,12 +92,12 @@ func runHTTPKeepAlive(ctx context.Context, client *http.Client, keepAliveURL str
 		requestCtx, cancel := context.WithTimeout(ctx, keepAliveRequestTimeout)
 		req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, keepAliveURL, nil)
 		if err != nil {
-			log.Printf("KeepAlive: %s", err)
+			log.Print("KeepAlive: invalid HTTP request configuration")
 		} else {
 			resp, err := client.Do(req)
 			if err != nil {
 				if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-					log.Printf("KeepAlive: %s", err)
+					log.Print("KeepAlive: HTTP request failed")
 				}
 			} else {
 				log.Printf("KeepAlive: OK, status code %d", resp.StatusCode)

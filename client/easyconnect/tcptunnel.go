@@ -66,7 +66,7 @@ func (c *Client) DialTCP(ctx context.Context, addr *net.TCPAddr) (net.Conn, erro
 			reply = append(reply, b[0])
 		}
 		if !strings.HasPrefix(string(reply), command.code+" OK\r\n") {
-			return nil, fmt.Errorf("TCP tunnel %s: unexpected response %q", command.code, reply)
+			return nil, fmt.Errorf("TCP tunnel %s: unexpected gateway response", command.code)
 		}
 	}
 

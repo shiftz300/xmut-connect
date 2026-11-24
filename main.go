@@ -34,8 +34,9 @@ func main() {
 	}
 
 	log.Init()
+	log.Println("Start ZJU Connect " + zjuConnectVersionString())
 	if conf.ManagementEnabled {
-		log.Suppress()
+		log.DisableDebug()
 		if err := runManagement(conf); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -43,7 +44,6 @@ func main() {
 		return
 	}
 
-	log.Println("Start ZJU Connect " + zjuConnectVersionString())
 	if conf.DebugDump {
 		log.EnableDebug()
 	}
